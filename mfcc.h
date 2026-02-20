@@ -4,8 +4,9 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
-
-#include "kissFFT/kiss_fftr.h"
+extern "C" {
+#include "../external/kissFFT/kiss_fftr.h"
+}
 #include "hamming_window.hpp"
 
 constexpr int16_t INT16_MAX_VALUE = 32767;
@@ -14,11 +15,11 @@ constexpr int16_t ALPHA_Q15 = 31876; // 0.97 in Q15
 
 template <
     int SIGNAL_SIZE = 16000,
-    int FRAME_SIZE = 400,
-    int FRAME_STRIDE = 160,
+    int FRAME_SIZE = 480,
+    int FRAME_STRIDE = 320,
     int NUMBER_FILTERS = 40,
     int NFFT = 512,
-    int NUMBER_CEPS = 13,
+    int NUMBER_CEPS = 40,
     int NUM_FRAMES = 1 + (SIGNAL_SIZE - FRAME_SIZE + FRAME_STRIDE - 1) / FRAME_STRIDE
 >
 class MFCC
@@ -182,22 +183,22 @@ void MFCC<S,F,ST,NF,NFFT, NCEPS,NUM_FRAMES>::compute_triangle_filters()
         float f_center = from_mel_to_hz(delta * (f + 1));
         float f_max = from_mel_to_hz(delta * (f + 2));
 
-        int32_t sum = 0; // For normalization
+        //int32_t sum = 0; // For normalization
 
         for (int bin = 0; bin < NFFT/2 + 1; bin++)
         {
             float freq_hz = bin * (float(S) / NFFT);
 
-            float w;
+            float w = 0.0f;
             if (freq_hz < f_min) w = 0;
             else if (freq_hz < f_center) w = (freq_hz - f_min) / (f_center - f_min);
             else if (freq_hz < f_max) w = (f_max - freq_hz) / (f_max - f_center);
             else w = 0;
 
             mel_weights[f][bin] = int16_t(w * 32767.f);
-            sum += mel_weights[f][bin] * mel_weights[f][bin];
+            //sum += mel_weights[f][bin] * mel_weights[f][bin];
         }
-
+        /*
         // Second pass: normalize
         if (sum > 0)
         {
@@ -205,14 +206,15 @@ void MFCC<S,F,ST,NF,NFFT, NCEPS,NUM_FRAMES>::compute_triangle_filters()
             {
                 mel_weights[f][bin] = (int32_t(mel_weights[f][bin]) * 32767) / sum;
             }
-        }
+        }*/
     }
 }
 
 template <int S, int F, int ST, int NF, int NFFT, int NCEPS, int NUM_FRAMES>
 void MFCC<S,F,ST,NF,NFFT, NCEPS,NUM_FRAMES>::apply_mel_banks()
 {
-    constexpr float LOG_SCALE = 1.0f; // adjust for dynamic range
+    constexpr float LOG_FLOOR = 1e-7f;
+    constexpr float LOG_SCALE = 256.0f; // Q8
 
     for(size_t n = 0; n < NUM_FRAMES; n++)
     {
@@ -222,17 +224,18 @@ void MFCC<S,F,ST,NF,NFFT, NCEPS,NUM_FRAMES>::apply_mel_banks()
 
             for(int s = 0; s < NFFT/2 + 1; s++)
             {
-                acc += power_spectrum[n][s] * mel_weights[filter][s];
+                acc += int64_t(power_spectrum[n][s]) * 
+                        int64_t(mel_weights[filter][s]);
             }
-            // Example: log compression
-            //float db = 20 * log10f(std::max((float)acc, 1.0f)); 
-            // Convert to float energy
-            float energy = acc * (1.0f / 32768.0f);
 
-            // Log compression
-            float log_energy = logf(std::max(energy, 1e-6f));
+            // Q15 → float
+            float energy = acc / (32768.0f * 32768.0f);
 
-            filter_banks[n][filter] = (int16_t)(log_energy * LOG_SCALE);
+            float log_energy = logf(std::max(energy, LOG_FLOOR));
+
+            int32_t q = int32_t(log_energy * LOG_SCALE);
+
+            filter_banks[n][filter] = int16_t(std::clamp(q, -32768, 32767));
         }
     }
 }
